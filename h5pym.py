@@ -91,14 +91,11 @@ class Group(Interface):
             except KeyError:
                 pass
 
-
-
         dataset = self.hdf.create_dataset(key, dtype=dtype, fillvalue=fillvalue, **kwargs)
 
         if date is True:
             # Standart date format '2014/10/31 14:25:57'
             dataset.attrs['date'] = datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S')
-
 
         return Dataset(dataset)
 
@@ -111,64 +108,10 @@ class Group(Interface):
 
 class Dataset(Interface):
 
-    def __init__(self, dataset, hdf_file=None, *file_args, **file_kwargs):
+    def __init__(self, dataset):
         super().__init__(dataset)
 
-        if hdf_file:
-            # Create or open hdf file
-            if isinstance(hdf_file, str):
-                hdf_file = h5py.File(hdf_file, *file_args, **file_kwargs)
-
-            # Get the dataset object for hdf file
-            dataset = hdf_file[dataset]
-
         self.__dict__['trim'] = True
-
-    @classmethod
-    def create(cls, dataset, hdf_file, override=False, date=None,
-               fieldnames=None, fieldtype=float, fillvalue=nan,
-               **dset_kwargs):
-        """Create a new HDF5 dataset and initalize DatasetHdf.
-
-        """
-        if date is None:
-            # Standart date format '2014/10/31 14:25:57'
-            date = datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S')
-
-        # Hdf is filename
-        if isinstance(hdf_file, str):
-            # Create directory if it does not exit
-            directory = os.path.dirname(hdf_file)
-            if directory:
-                if not os.path.exists(directory):
-                    os.makedirs(directory)
-
-            hdf_file = h5py.File(hdf_file)
-
-        # Delete dataset if it exists
-        if override:
-            try:
-                del hdf_file[dataset]
-            except KeyError:
-                pass
-
-        # Create dtype from fieldnames and fillvalue
-        if fieldnames:
-            dtype = np.dtype([(name, fieldtype) for name in fieldnames])
-            dset_kwargs['dtype'] = dtype
-
-            if not isinstance(fillvalue, collections.Sequence):
-                fillvalue = np.array(tuple([fillvalue] * len(fieldnames)),
-                                     dtype)
-
-        dset_kwargs['fillvalue'] = fillvalue
-
-        # Initalize Hdf5Base instance with new dataset
-        dsetbase = cls(hdf_file.create_dataset(dataset, **dset_kwargs))
-        dsetbase.date = date
-
-        # Return
-        return dsetbase
 
     def __getitem__(self, key):
 
@@ -187,7 +130,7 @@ class Dataset(Interface):
             if key.step is None:
                 step = None
             else:
-                step = int(key.step)
+                step = int(key.step)m
 
             # Pack new slice with integer values
             key = slice(start, stop, step)
