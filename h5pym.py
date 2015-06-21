@@ -1,100 +1,151 @@
 # -*- coding: utf-8 -*
 
 import h5py
-import os
 import numpy as np
-from numpy import nan
-import collections
 import datetime
+import PIL
 
 
-def hdf_open(filename, *hdf_file, **kw_hdf_file):
-    hdf_file = h5py.File(filename, *hdf_file, **kw_hdf_file)
-    return Group(hdf_file['/'])
+class HdfProxy(object):
 
+    def __init__(self):
+        self.__dict__['_hdf'] = None
 
-class Interface(object):
-    """Dynamic and lightweight interface on h5py.
+    def __getattr__(self, name):
+        return getattr(self._hdf, name)
 
-    """
+    def __setattr__(self, name, value):
+        return setattr(self._hdf, name, value)
 
-    def __init__(self, hdf):
-        if isinstance(hdf, (Group, Dataset)):
-            self.__dict__['_hdf'] = hdf._hdf
-        else:
-            self.__dict__['_hdf'] = hdf
+    def __setitem__(self, name, value):
+        return self._hdf.__setitem__(name, value)
 
     def __dir__(self):
-        return list(self._hdf.attrs.keys()) + list(self.__dict__.keys())
-
-    def __setitem__(self, key, item):
-        self._hdf[key] = item
-
-    def __delitem__(self, key):
-        del self._hdf[key]
-
-    @property
-    def attrs(self):
-        return self._hdf.attrs
+        return dir(self._hdf)
 
 
-class Group(Interface):
+class HdfInterface(HdfProxy):
 
-    def __getitem__(self, key):
-        item = self._hdf[key]
+    def __getitem__(self, name):
+        item = self._hdf[name]
 
-        if isinstance(item, h5py.Dataset):
-            return Dataset(item)
-        elif isinstance(item, h5py.Group):
+        if isinstance(item, h5py.Group):
             return Group(item)
+        elif isinstance(item, h5py.Dataset):
+            try:
+                if item.attrs['CLASS'] == b'IMAGE':
+                    return PIL.Image.fromarray(item[:])
+                else:
+                    return Dataset(item)
+            except KeyError:
+                return Dataset(item)
         else:
-            return self._hdf[key]
+            return item
 
-    def __repr__(self):
-        return str(self.keys())
+    def __delitem__(self, name):
+        del self._hdf[name]
 
-    def __enter__(self):
-        return self
+    def tree(self):
+        return self._hdf.visit(print)
 
-    def __exit__(self, *args, **kwargs):
-        self.close()
-
-    def keys(self):
-        return list(self._hdf.keys())
-
-    def move(self, source, destination):
-        self._hdf.move(source, destination)
-
-    def copy(self, source, destination, *copy, **kw_copy):
-        self._hdf.copy(source, destination, *copy, **kw_copy)
-
-    def close(self):
-        self._hdf.file.close()
+    def _rm(self, key):
+        try:
+            del self[key]
+        except KeyError:
+            pass
 
     def create_dataset(self, key, override=False, date=True,
                        dtype=np.float64, fillvalue=np.nan, **kwargs):
 
         if override is True:
-            try:
-                del self[key]
-            except KeyError:
-                pass
+            self._rm(key)
 
         dataset = self._hdf.create_dataset(key, dtype=dtype, fillvalue=fillvalue, **kwargs)
 
         if date is True:
             # Standart date format '2014/10/31 14:25:57'
             dataset.attrs['date'] = datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S')
+        elif isinstance(date, str):
+            dataset.attrs['date'] = datetime.datetime.now().strftime(date)
+        elif date is False:
+            pass
+        elif date is None:
+            pass
+        else:
+            raise TypeError('date must be True, False or a custom datestring')
 
         return Dataset(dataset)
 
+    def add_image(self, key, filename, override=False):
+        """Load image into hdf dataset.
 
-class Dataset(Interface):
+        """
+
+        if override is True:
+            self._rm(key)
+
+        # Store the image as HDF dataset and save it after converting in RGB values
+        # Open the image
+        with PIL.Image.open(filename) as im:
+
+            # Convert the image in RGB numpy array
+            img_ary = np.array(im.convert('RGB'), dtype=np.uint8)
+
+            # Store the numpy array in the HDF dataset
+            dset = self.create_dataset(key, override=override, data=img_ary,
+                                       dtype=np.uint8, fillvalue=None)
+
+            # Add HDF5 Image Specification 1.2
+            dset.attrs['CLASS'] = np.string_('IMAGE')
+            dset.attrs['IMAGE_VERSION'] = np.string_('1.2')
+            dset.attrs['IMAGE_SUBCLASS'] = np.string_('IMAGE_TRUECOLOR')
+
+
+    def add_txt(self, key, filename, override=False, unicode=True):
+        """Load txt file into hdf dataset.
+
+        """
+
+        with open(filename, 'r') as txt:
+            # We have to use a special type to unicode strings in hdf
+            if unicode:
+                dt = h5py.special_dtype(vlen=str)
+            else:
+                dt = h5py.special_dtype(vlen=bytes)
+
+            content = txt.read()
+            dset = self.create_dataset(key, override=override,
+                                       shape=(1,), dtype=dt, fillvalue=None)
+            dset[0] = content
+
+class File(HdfInterface):
+
+    def __init__(self, filename, *file_args, **file_kwargs):
+        self.__dict__['_hdf'] = h5py.File(filename, *file_args, **file_kwargs)
+
+    def __repr__(self):
+        return str(list(self._hdf))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args, **kwargs):
+        return self._hdf.__exit__(*args, **kwargs)
+
+
+class Group(HdfInterface):
+
+    def __init__(self, group):
+        self.__dict__['_hdf'] = group
+
+
+class Dataset(HdfProxy):
 
     def __init__(self, dataset):
-        super().__init__(dataset)
+        self.__dict__['_hdf'] = dataset
 
-        self.__dict__['trim'] = True
+    def __repr__(self):
+        return repr(self._hdf)
 
     def __getitem__(self, key):
 
@@ -118,140 +169,41 @@ class Dataset(Interface):
             # Pack new slice with integer values
             key = slice(start, stop, step)
 
-        return self._hdf[key]
+        return self._hdf.__getitem__(key)
 
-    def __repr__(self):
-        return repr(self._hdf)
+    def add_data(self, position, data):
 
-    def __len__(self):
-        """Number of levels.
+        data = np.array(data, copy=False)
 
-        """
-        return self._hdf.size
+        size_dim0 = self.shape[-1]
+        start = position[-1]
+        position = list(position[:-1])
+        shape = list(self.shape[:-1])
 
-    @property
-    def shape(self):
-        """Datatpye of the signal.
+        # Insert the first 1d array beginning at start
+        ary1d = data[:size_dim0 - start]
+        sl = tuple(position + [slice(start, start + ary1d.size)])
+        self[sl] = ary1d
 
-        """
-        return self._hdf.shape
+        # Iterate over data in size of the last dimension
+        for index in range(size_dim0 - start, data.size, size_dim0):
 
-    @property
-    def dims(self):
-        """Access to dimension scales.
+            # Increase the position in dataset
+            position_iter = zip(reversed(position), reversed(shape))
+            for i, (position_dim, size_dim) in enumerate(position_iter, 1):
 
-        """
-        return self._hdf.dims
+                # Increase position: (..., 1, 5) -> (1, 1, 6)
+                if position_dim < size_dim - 1:
+                    position[-i] += 1
+                    break
+                # Postion is equal size of dimension: (...,1,9) -> (1, 2, 0)
+                else:
+                    position[-i] = 0
+            else:
+                # Make sure not to return start position (0,...,0) at the end
+                position[:] = shape
 
-#    def add_data(self, loop_pos, data):
-#        """Append data to dset
-#
-#        """
-#
-#        # Check measurment dimension -> 1d
-#        if len(self._hdf.shape) == 1:
-#            self._add_data_1d(loop_pos, data)
-#
-#        # Check measurment dimension -> 2d
-#        elif len(self._hdf.shape) == 2:
-#            self._add_data_2d(loop_pos, data)
-#
-#        # Check measurment dimension -> 3d
-#        elif len(self._hdf.shape) == 3:
-#            self._add_data_3d(loop_pos, data)
-#
-#        else:
-#            err_str = 'add_data only works in 1d, 2d and 3d'
-#            raise NotImplementedError(err_str)
-#
-#    def _add_data_1d(self, loop_pos, data):
-#
-#        # Single datapoint
-#        if len(data) == 1:
-#            self._hdf[loop_pos] = data[0]
-#        elif type(data) == tuple:
-#            self._hdf[loop_pos] = data
-#
-#        # Multiple datapoints
-#        else:
-#            start_pos = list(loop_pos)
-#            start_pos[-1] = loop_pos[-1] - (len(data) - 1)
-#            self._hdf[start_pos[-1]:loop_pos[-1] + 1] = data
-#
-#    def _add_data_2d(self, loop_pos, data):
-#
-#        # Single datapoint
-#        if len(data) == 1:
-#            self._hdf[loop_pos] = data[0]
-#        elif type(data) == tuple:
-#            self._hdf[loop_pos] = data
-#
-#        # Multiple datapoints
-#        else:
-#            # in one line
-#            if not (len(data) - 1) > loop_pos[-1]:
-#                start_pos = list(loop_pos)
-#                start_pos[-1] = loop_pos[-1] - (len(data) - 1)
-#
-#                self._hdf[loop_pos[-2], start_pos[-1]:loop_pos[-1] + 1] = data
-#
-#            # in multiple lines
-#            else:
-#                shape = self._hdf.shape
-#
-#                y_pos = loop_pos[-2]
-#                x_pos = loop_pos[-1] - (len(data) - 1)
-#                while x_pos < 0:
-#                    y_pos -= 1
-#                    x_pos = x_pos + shape[-1]
-#                start_pos = list(loop_pos)
-#                start_pos[-2] = y_pos
-#                start_pos[-1] = x_pos
-#                d_ind = [0, (shape[-1] - 1) - x_pos]
-#                while y_pos < loop_pos[-2]:
-#                    d_ind[0] += x_pos + (shape[-1])
-#                    d_ind[1] += x_pos + (shape[-1])
-#                    self._hdf[y_pos, x_pos:shape[-1]+1] = data[d_ind[0]:d_ind[1]+1]
-#                    x_pos = 0
-#                    y_pos += 1
-#
-#                self._hdf[loop_pos[-3], y_pos, 0:loop_pos[-1]+1] = data[d_ind[0]:]
-#
-#    def _add_data_3d(self, loop_pos, data):
-#
-#        # Single datapoint
-#        if len(data) == 1:
-#            self._hdf[loop_pos] = data[0]
-#        elif type(data) == tuple:
-#            self._hdf[loop_pos] = data
-#
-#        # Multiple datapoints
-#        else:
-#            # in one line
-#            if not (len(data) - 1) > loop_pos[-1]:
-#                start_pos = list(loop_pos)
-#                start_pos[-1] = loop_pos[-1] - (len(data) - 1)
-#
-#                self._hdf[loop_pos[-3], loop_pos[-2], start_pos[-1]:loop_pos[-1] + 1] = data
-#
-#            # in multiple lines
-#            else:
-#                shape = self._hdf.shape
-#
-#                y_pos = loop_pos[-2]
-#                x_pos = loop_pos[-1] - (len(data) - 1)
-#                while x_pos < 0:
-#                    y_pos -= 1
-#                    x_pos = x_pos + shape[-1]
-#                start_pos = list(loop_pos)
-#                start_pos[-2] = y_pos
-#                start_pos[-1] = x_pos
-#                d_ind = [0, (shape[-1] - 1) - x_pos]
-#                while y_pos < loop_pos[-2]:
-#                    d_ind[0] += x_pos + (shape[-1])
-#                    d_ind[1] += x_pos + (shape[-1])
-#                    self._hdf[loop_pos[-3], y_pos, x_pos:shape[-1]+1] = data[d_ind[0]:d_ind[1]+1]
-#                    x_pos = 0
-#                    y_pos += 1
-#
-#                self._hdf[loop_pos[-3], y_pos, 0:loop_pos[-1]+1] = data[d_ind[0]:]
+            # Insert the 1d array at position
+            ary1d = data[index: index + size_dim0]
+            sl = tuple(position + [slice(None, ary1d.size)])
+            self[sl] = ary1d
