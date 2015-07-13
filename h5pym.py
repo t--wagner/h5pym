@@ -24,6 +24,9 @@ class HdfProxy(object):
     def __dir__(self):
         return dir(self._hdf)
 
+    def __len__(self):
+        return len(self._hdf)
+
     def add_attrs(self, pairs, prefix='', suffix='', none_type=False):
         """Adding a list of tuples or a dictonary type to the attributes.
 
