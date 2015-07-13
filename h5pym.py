@@ -4,6 +4,7 @@ import h5py
 import numpy as np
 import datetime
 import PIL
+import os
 
 
 class HdfProxy(object):
@@ -22,6 +23,32 @@ class HdfProxy(object):
 
     def __dir__(self):
         return dir(self._hdf)
+
+    def add_attrs(self, pairs, prefix='', suffix='', none_type=False):
+        """Adding a list of tuples or a dictonary type to the attributes.
+
+        To handle unsupported types it transforms None to False and tries to make a str
+        out of everything else.
+
+        """
+
+        try:
+            pairs = pairs.items()
+        except AttributeError:
+            pass
+
+        for key, value in pairs:
+            # Ignor or convert None types
+            if value is None:
+                if none_type is None:
+                    continue
+                else:
+                    value = none_type
+
+            try:
+                self._hdf.attrs['{}{}{}'.format(prefix, key, suffix)] = value
+            except TypeError:
+                self._hdf.attrs['{}{}{}'.format(prefix, key, suffix)] = str(value)
 
 
 class HdfInterface(HdfProxy):
@@ -48,17 +75,14 @@ class HdfInterface(HdfProxy):
     def tree(self):
         return self._hdf.visit(print)
 
-    def _rm(self, key):
-        try:
-            del self[key]
-        except KeyError:
-            pass
-
     def create_dataset(self, key, override=False, date=True,
                        dtype=np.float64, fillvalue=np.nan, **kwargs):
 
-        if override is True:
-            self._rm(key)
+        if override:
+            try:
+                del self._hdf[key]
+            except KeyError:
+                pass
 
         dataset = self._hdf.create_dataset(key, dtype=dtype, fillvalue=fillvalue, **kwargs)
 
@@ -76,16 +100,38 @@ class HdfInterface(HdfProxy):
 
         return Dataset(dataset)
 
+    def create_composed_dataset(self, key, override, fieldnames, fieldtype=np.float64,
+                                fillvalue=np.nan, **kwargs):
+
+        # Creating the composed dataytpe
+        try:
+            if not len(fieldnames) == len(fieldtype):
+                raise TypeError('fieldnames and fieldtypes have different len')
+            fields = zip(fieldnames, fieldtype)
+        except TypeError:
+            fields = ((fieldname, fieldtype) for fieldname in fieldnames)
+
+        composed_dtype = np.dtype(list(fields))
+
+        # Creating the composed fillvalue
+        try:
+            if not len(fillvalue) == len(fieldnames):
+                raise TypeError('fillvalues and fields have different len')
+            fillvalues = fillvalue
+        except TypeError:
+            fillvalues = (fillvalue for i in range(len(fieldnames)))
+
+        composed_fillvalue = np.array(tuple(fillvalues), dtype=composed_dtype)
+
+        return self.create_dataset(key, override, date=True, dtype=composed_dtype,
+                                   fillvalue=composed_fillvalue, **kwargs)
+
     def add_image(self, key, filename, override=False):
         """Load image into hdf dataset.
 
         """
 
-        if override is True:
-            self._rm(key)
-
-        # Store the image as HDF dataset and save it after converting in RGB values
-        # Open the image
+        # Store image as HDF dataset and after converting into RGB values
         with PIL.Image.open(filename) as im:
 
             # Convert the image in RGB numpy array
@@ -99,7 +145,6 @@ class HdfInterface(HdfProxy):
             dset.attrs['CLASS'] = np.string_('IMAGE')
             dset.attrs['IMAGE_VERSION'] = np.string_('1.2')
             dset.attrs['IMAGE_SUBCLASS'] = np.string_('IMAGE_TRUECOLOR')
-
 
     def add_txt(self, key, filename, override=False, unicode=True):
         """Load txt file into hdf dataset.
@@ -118,9 +163,22 @@ class HdfInterface(HdfProxy):
                                        shape=(1,), dtype=dt, fillvalue=None)
             dset[0] = content
 
+
 class File(HdfInterface):
 
-    def __init__(self, filename, *file_args, **file_kwargs):
+    def __init__(self, filename, *file_args, override=False, **file_kwargs):
+
+        # Create directories if it does not exit
+        directory = os.path.dirname(filename)
+        if directory:
+            if not os.path.exists(directory):
+                os.makedirs(directory)
+
+        #  Check for existing file if overide is False
+        if override:
+            if os.path.exists(filename):
+                os.remove(filename)
+
         self.__dict__['_hdf'] = h5py.File(filename, *file_args, **file_kwargs)
 
     def __repr__(self):
@@ -171,9 +229,10 @@ class Dataset(HdfProxy):
 
         return self._hdf.__getitem__(key)
 
-    def add_data(self, position, data):
+    def add_data(self, position, data, flush=True):
 
-        data = np.array(data, copy=False)
+        # Transform input data to the right dataytpe
+        data = np.array(data, copy=False, dtype=self.dtype)
 
         size_dim0 = self.shape[-1]
         start = position[-1]
@@ -207,3 +266,6 @@ class Dataset(HdfProxy):
             ary1d = data[index: index + size_dim0]
             sl = tuple(position + [slice(None, ary1d.size)])
             self[sl] = ary1d
+
+        if flush:
+            self.file.flush()
